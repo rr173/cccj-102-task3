@@ -13,6 +13,9 @@
 跨进程仲裁**只发生在数据库事务里**——没有线程锁、PID 文件或进程内内存表
 参与所有权裁决。
 
+离线可核验防篡改凭证册、封存密钥换代、一致性导出和隐私清除的完整协议见
+[`EVIDENCE.md`](EVIDENCE.md)。
+
 ---
 
 ## 一条命令
@@ -21,6 +24,10 @@
 # HA 形态：自起 store+worker-a+worker-b+故障注入 receiver，跑 8 场景验收后退出
 ./run-ha.sh
 TTL=3 REPORT=out.json ./run-ha.sh          # 缩短 TTL、指定报告路径
+
+# 离线防篡改凭证册：7 个真实双进程/故障注入/离线核验场景
+./run-evidence.sh
+TTL=2 REPORT=evidence-report.json ./run-evidence.sh
 
 # HA 常驻演示集群（4 个独立 OS 进程），便于手工 curl 运维视图
 ./run-ha.sh up
@@ -34,6 +41,8 @@ TTL=3 REPORT=out.json ./run-ha.sh          # 缩短 TTL、指定报告路径
 
 ```bash
 python3 -m whub acceptance                 # 自起全新集群跑 8 场景，产出 JSON 报告
+python3 -m whub evidence                   # 凭证册 7 场景：双进程、崩溃、篡改、导出、换代、清除、拒写
+python3 -m whub verify export.whubpak      # 离线核验冻结凭证包
 python3 -m whub store                      # 独立 durable store 进程
 python3 -m whub worker --worker-id worker-a --host 127.0.0.1 --port 8091
 python3 -m whub worker --worker-id worker-b --host 127.0.0.1 --port 8092
@@ -221,7 +230,11 @@ whub/
                  fence 在 WHERE 中校验；store 独占单调时钟；写闸门
   client.py      store 客户端：DirectClient(进程内) / HttpStore(跨进程) 同一接口
   api.py         统一 HTTP 面：业务 API + 控制面 + /rpc（store 进程）+ worker 钩子
-  worker.py      投递 worker：lease 持有者；出站前必过 touch 写事务
+  worker.py      投递 worker：lease 持有者；出站前必过 touch，出站意图先于副作用落库
+  anchor_crypto.py 纯标准库 Ed25519：封存签名/验签，私钥不进数据库或导出包
+  evidence_pack.py 长度前缀冻结包与 64KiB 分块摘要，损坏可定位到字节
+  verifier.py    离线核验器：重放摘要链、锚点、换代证明和导出证明
+  evidence_acceptance.py 凭证册 7 个真实多进程/故障注入验收
   sender.py      出站 HTTP、v1/v2 HMAC 签名、结果分类、指数退避
   sink.py        故障注入 receiver（签名校验/幂等/429/timeout/down/统计）
   store.py       引擎 re-export 垫片（HTTP 面由 api.py 的 store 形态承载）

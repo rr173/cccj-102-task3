@@ -40,6 +40,7 @@ def run_hub(args) -> int:
     from .client import DirectClient
     from .engine import Engine
     from .worker import Worker
+    from .anchor_scheduler import AnchorScheduler
 
     cfg = HubConfig.from_env()
     os.makedirs(os.path.dirname(cfg.db_path) or ".", exist_ok=True)
@@ -50,6 +51,8 @@ def run_hub(args) -> int:
     worker = Worker(cfg.worker_id or "worker-solo", store, cfg,
                     host=cfg.host, port=cfg.port)
     worker.start()
+    anchors = AnchorScheduler(store, cfg.anchor_interval)
+    anchors.start()
     server = HubServer((cfg.host, cfg.port), store, cfg, worker=worker,
                        engine=engine)
     logging.getLogger("whub").info(
@@ -60,6 +63,7 @@ def run_hub(args) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        anchors.stop()
         worker.stop()
         server.server_close()
         engine.close()
@@ -70,6 +74,7 @@ def run_store(args) -> int:
     from .api import HubServer
     from .client import DirectClient
     from .engine import Engine
+    from .anchor_scheduler import AnchorScheduler
 
     cfg = HubConfig.from_env()
     if getattr(args, "host", None):
@@ -81,6 +86,8 @@ def run_store(args) -> int:
     store = DirectClient(engine)
     if cfg.seed and args.seed:
         _seed_if_needed(store)
+    anchors = AnchorScheduler(store, cfg.anchor_interval)
+    anchors.start()
     # store 进程：完整业务/控制面 + /rpc 透传，不运行 worker
     server = HubServer((cfg.host, cfg.port), store, cfg, worker=None,
                        engine=engine, enable_rpc=True)
@@ -93,6 +100,7 @@ def run_store(args) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        anchors.stop()
         server.server_close()
         engine.close()
     return 0
@@ -169,6 +177,26 @@ def run_e2e(args) -> int:
         return 2
 
 
+def run_verify(args) -> int:
+    import json
+    from .verifier import verify_file
+    r = verify_file(args.bundle, args.scan_secret)
+    if args.json:
+        print(json.dumps(r, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print("OK" if r["ok"] else "INVALID", args.bundle)
+        print(f"entries={r['entry_count']} head={r['head_seq']} "
+              f"digest={r['head_digest']}")
+        if not r["ok"]:
+            print("damage=", json.dumps(r["damage"], ensure_ascii=False))
+    return 0 if r["ok"] else 1
+
+
+def run_evidence_acceptance(args) -> int:
+    from .evidence_acceptance import EvidenceAcceptance
+    return EvidenceAcceptance(args.ttl, args.report).run()
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="whub")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -202,6 +230,17 @@ def main(argv=None) -> int:
     a.add_argument("--scenarios", default="",
                    help="只跑指定场景，逗号分隔（1..8）")
     a.set_defaults(func=run_acceptance)
+
+    a = sub.add_parser("evidence", help="防篡改凭证册 7 场景验收")
+    a.add_argument("--ttl", type=float, default=2.0)
+    a.add_argument("--report", default="evidence-report.json")
+    a.set_defaults(func=run_evidence_acceptance)
+
+    v = sub.add_parser("verify", help="离线核验 .whubpak 凭证包")
+    v.add_argument("bundle")
+    v.add_argument("--scan-secret", default=None)
+    v.add_argument("--json", action="store_true")
+    v.set_defaults(func=run_verify)
 
     e = sub.add_parser("e2e", help="旧功能验收（对已运行的 hub+sink）")
     e.add_argument("--hub", default="http://127.0.0.1:8080")

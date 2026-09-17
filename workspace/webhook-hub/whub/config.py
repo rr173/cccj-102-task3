@@ -30,6 +30,7 @@ class HubConfig:
     host: str = "0.0.0.0"
     port: int = 8080
     db_path: str = "/tmp/whub/data.db"
+    anchor_interval: float = 3600.0
     http_timeout: float = 2.5          # 单次出站请求超时
     max_workers: int = 128            # 单 worker 出站 HTTP 线程上限
     seed: bool = True                 # 启动时种入演示租户
@@ -67,6 +68,7 @@ class HubConfig:
         c.host = os.environ.get("WHUB_HOST", c.host)
         c.port = _env_int("WHUB_PORT", c.port)
         c.db_path = os.environ.get("WHUB_DB", c.db_path)
+        c.anchor_interval = _env_float("WHUB_ANCHOR_INTERVAL", c.anchor_interval)
         c.http_timeout = _env_float("WHUB_HTTP_TIMEOUT", c.http_timeout)
         c.max_workers = _env_int("WHUB_MAX_WORKERS", c.max_workers)
         c.seed = os.environ.get("WHUB_SEED", "1") not in ("0", "false", "False")

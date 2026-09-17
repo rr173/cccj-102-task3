@@ -177,6 +177,38 @@ class Cluster:
             log.warning("[%s] sent signal %s -> worker-%s pid=%d",
                         self.name, sig, w, p.pid)
 
+    def kill_store(self, sig: int = signal.SIGKILL) -> None:
+        p = self.procs.get("store")
+        if p and p.poll() is None:
+            os.killpg(os.getpgid(p.pid), sig)
+            log.warning("[%s] sent signal %s -> store pid=%d",
+                        self.name, sig, p.pid)
+
+    def restart_store(self) -> None:
+        old = self.procs.get("store")
+        if old and old.poll() is None:
+            os.killpg(os.getpgid(old.pid), signal.SIGKILL)
+            old.wait(timeout=5)
+        env = {
+            "WHUB_LEASE_TTL": str(self.ttl),
+            "WHUB_RENEW_INTERVAL": str(max(self.ttl / 3, 0.3)),
+            "WHUB_HEARTBEAT_INTERVAL": str(max(self.ttl / 4, 0.3)),
+            "WHUB_SWEEP_INTERVAL": "0.15",
+            "WHUB_ACQUIRE_BUDGET": str(self.acquire_budget),
+            "WHUB_REBALANCE_BUDGET": str(self.rebalance_budget),
+            "WHUB_RENEW_JITTER": "0.05",
+            "WHUB_HTTP_TIMEOUT": "3",
+            "WHUB_BACKOFF_BASE": "0.2",
+            "WHUB_BACKOFF_CAP": "8",
+            "WHUB_SEED": "0",
+            "WHUB_DRAIN_DEADLINE": str(self.ttl * 3),
+            "WHUB_MAX_WORKERS": "64",
+        }
+        self._spawn("store", [
+            "store", "--host", "127.0.0.1", "--port", str(self.store_port)],
+            {**env, "WHUB_DB": os.path.join(self.dir, "store.db")})
+        wait_for(f"{self.store}/healthz")
+
     def pause(self, w: str) -> None:
         """真实 OS 级 stop-the-world：SIGSTOP 冻结整个 worker 进程组。
 

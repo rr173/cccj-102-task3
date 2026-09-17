@@ -11,10 +11,13 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import random
 import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -47,6 +50,8 @@ class Worker:
         # 缓存：lane_id -> LeaseToken（仅用于少读库；裁决以 DB 为准）
         self.tokens: dict[str, LeaseToken] = {}
         self.busy_lanes: set[str] = set()       # 本进程内已提交 claim/在途
+        # 故障注入：副作用前/副作用后、进程仍持有响应时强杀
+        self.crash_point = ""
         self._lock = threading.RLock()
         self.stop_event = threading.Event()
         # STW 注入：非 0 时主循环在该 store 时钟前原地睡眠（不续期）
@@ -326,7 +331,6 @@ class Worker:
                 self.local["store_unavailable"] += 1
                 log.warning("suppress outbound for %s: store unavailable",
                             job["id"])
-                # job 在 DB 仍为 leased，租约过期后由继任者重发
                 return
 
             ver = self.store.rpc("delivery_secret", eid=job["endpoint_id"],
@@ -343,8 +347,28 @@ class Worker:
                 kid=job["kid"], object_key=self._object_key(job, ev),
                 seq=job["seq"], payload=ev["payload"],
                 secret=ver["secret"], sig_version=job["sig_version"])
+            request_digest = hashlib.sha256(req.data or b"").hexdigest()
+            payload_digest = hashlib.sha256(ev["payload"].encode()).hexdigest()
+            parsed = urllib.parse.urlparse(job["target_url"])
+            begin = self.store.rpc(
+                "begin_attempt", job_id=job["id"], worker_id=self.wid,
+                epoch=epoch, fence=fence, request_digest=request_digest,
+                payload_digest=payload_digest, host=parsed.netloc,
+                path=parsed.path)
+            action_id = begin["action_id"]
+            if not begin.get("idempotent"):
+                if self.crash_point == "before_side_effect":
+                    log.error("fault injection: SIGKILL before side effect %s",
+                              action_id)
+                    os._exit(137)
+                self.store.rpc("mark_dispatched", action_id=action_id,
+                               worker_id=self.wid, epoch=epoch, fence=fence)
             result = send(req, timeout=self.cfg.http_timeout)
-            done = self._settle(lane_id, job, epoch, fence, result)
+            if self.crash_point == "after_side_effect":
+                log.error("fault injection: SIGKILL after side effect %s",
+                          action_id)
+                os._exit(137)
+            done = self._settle(lane_id, job, epoch, fence, result, action_id)
         except StaleEpoch:
             log.warning("job %s result dropped: stale fence (new owner wins)",
                         job["id"])
@@ -356,7 +380,6 @@ class Worker:
         finally:
             with self._lock:
                 self.busy_lanes.discard(lane_id)
-            # lane 仍归我所有且仍有队头：立刻驱动下一条（序号连续推进）
             if done and lane_id in self.tokens:
                 self.wake.set()
 
@@ -364,33 +387,32 @@ class Worker:
     def _object_key(job: dict, ev: dict) -> str:
         return ev.get("object_key") or f"lane-{job['lane_id']}"
 
-    def _settle(self, lane_id, job, epoch, fence, result) -> bool:
-        """回写结果。三类终态/退避都携带 identical fence；返回是否已结算。"""
+    def _settle(self, lane_id, job, epoch, fence, result, action_id) -> bool:
+        """回写结果；成功凭证只在真实应答后出现。"""
+        not_before = None
+        error_kind = "permanent"
+        error = result.error or (f"HTTP {result.code}" if result.code else "network_error")
         if result.ok:
-            self.store.rpc("complete_success", job_id=job["id"],
-                           worker_id=self.wid, epoch=epoch, fence=fence,
-                           code=result.code or 200)
-            self.local["sent_ok"] += 1
-            return True
-        if result.retryable:
+            pass
+        elif result.retryable:
             store_now = self.store.rpc("now")
             delay = backoff_delay(
                 job["fail_count"] + 1, base=self.cfg.backoff_base,
                 cap=self.cfg.backoff_cap, retry_after=result.retry_after)
-            self.store.rpc("complete_retry", job_id=job["id"],
-                           worker_id=self.wid, epoch=epoch, fence=fence,
-                           code=result.code,
-                           error=result.error or f"HTTP {result.code}",
-                           not_before=store_now + delay)
+            not_before = store_now + delay
+            error_kind = "retryable"
             self.local["sent_retry"] += 1
             log.info("job %s retryable (%s) not_before +%.2fs",
                      job["id"], result.code or result.error, delay)
-            return True
-        self.store.rpc("complete_dead", job_id=job["id"],
-                       worker_id=self.wid, epoch=epoch, fence=fence,
-                       code=result.code or 0,
-                       error=result.error or f"HTTP {result.code}")
-        self.local["sent_dead"] += 1
+        else:
+            self.local["sent_dead"] += 1
+        r = self.store.rpc(
+            "finish_attempt", action_id=action_id, worker_id=self.wid,
+            epoch=epoch, fence=fence, code=result.code, error=error,
+            error_kind=error_kind, response_digest=result.response_digest,
+            not_before=not_before)
+        if result.ok and not r.get("idempotent"):
+            self.local["sent_ok"] += 1
         return True
 
     # ---- 测试注入：显式用旧 fence 做三类陈旧写 ------------------------

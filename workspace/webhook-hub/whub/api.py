@@ -23,7 +23,9 @@ from .util import new_id
 log = logging.getLogger("whub.api")
 
 METRIC_NAMES = ("acquire", "renew", "steal", "stale_write_rejected",
-                "drain_handoff", "orphan_recovered")
+                "drain_handoff", "orphan_recovered",
+                "credential_append", "intent_recovery", "tamper_detected",
+                "anchor_seal", "export_cutoff", "privacy_erase")
 
 
 def lane_key(eid: str, object_key: str) -> str:
@@ -508,7 +510,69 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, self.store.rpc("counters"))
         if path == "/admin/orphans":
             return self._json(200, self.store.rpc("orphan_lanes"))
+        if path == "/admin/evidence":
+            return self._evidence_overview()
+        if path == "/admin/evidence/verify":
+            return self._json(200, self.store.rpc("evidence_verify_local"))
+        if path == "/admin/intents":
+            return self._json(200, self.store.rpc("list_pending_intents"))
+        if path == "/admin/exports":
+            return self._json(200, self.store.rpc("list_exports"))
+        if path == "/admin/privacy/batches":
+            return self._json(200, self.store.rpc("privacy_batches"))
+        if path == "/admin/sealing-keys":
+            return self._json(200, self.store.rpc("sealing_keys"))
+        m = re.fullmatch(r"/admin/exports/([A-Za-z0-9_]+)/download", path)
+        if m:
+            return self._download_export(m.group(1))
+        m = re.fullmatch(r"/admin/evidence/([A-Za-z0-9_.-]+)", path)
+        if m:
+            return self._json(200, self.store.rpc(
+                "list_evidence", tenant_id=m.group(1)))
         self._err(404, "not_found", "no route")
+
+    def _evidence_overview(self) -> None:
+        chains = self.store.rpc("evidence_verify_local")
+        exports = self.store.rpc("list_exports")
+        anchors = []
+        for chain in chains:
+            rows = self.store.rpc("list_evidence", tenant_id=chain["tenant_id"])
+            sealed = [r for r in rows if r.get("anchor_id")]
+            if sealed:
+                r = sealed[-1]
+                anchors.append({"tenant_id": chain["tenant_id"],
+                                "anchor_id": r["anchor_id"], "seq": r["seq"],
+                                "digest": r["digest"]})
+        self._json(200, {
+            "chains": chains,
+            "chain_heads": [{"tenant_id": c["tenant_id"],
+                             "head_seq": c["head_seq"],
+                             "head_digest": c["head_digest"],
+                             "ok": c["ok"], "first_bad_seq": c["first_bad_seq"]}
+                            for c in chains],
+            "recent_anchors": anchors,
+            "pending_intents": self.store.rpc("list_pending_intents"),
+            "exports": exports,
+            "privacy_batches": self.store.rpc("privacy_batches"),
+            "sealing_keys": self.store.rpc("sealing_keys"),
+            "verification": chains})
+
+    def _download_export(self, export_id: str) -> None:
+        exports = self.store.rpc("list_exports")
+        row = next((x for x in exports if x["id"] == export_id), None)
+        if not row or not row.get("path"):
+            self._err(404, "not_found", "export not found")
+            return
+        import os
+        with open(row["path"], "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-whub-evidence")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="{export_id}.whubpak"')
+        self.end_headers()
+        self.wfile.write(body)
 
     def _admin_post(self, path: str) -> None:
         if not self._admin_auth():
@@ -525,6 +589,43 @@ class Handler(BaseHTTPRequestHandler):
                                trigger=data.get("trigger", "api"),
                                ttl=self.cfg.lease_ttl)
             return self._json(200, r)
+        if path == "/admin/evidence/export":
+            r = self.store.rpc(
+                "create_export", tenant_id=str(data["tenant_id"]),
+                start_seq=int(data.get("start_seq", 1)),
+                label=data.get("label"))
+            return self._json(201, r)
+        if path == "/admin/evidence/anchor":
+            r = self.store.rpc(
+                "seal_anchor", tenant_id=str(data["tenant_id"]),
+                reason=str(data.get("reason", "operator")),
+                force=bool(data.get("force", True)))
+            return self._json(200, r or {"ok": False, "reason": "empty chain"})
+        if path == "/admin/sealing-keys/rotate":
+            return self._json(200, self.store.rpc("rotate_sealing_key"))
+        if path == "/admin/intents/recover":
+            return self._json(200, self.store.rpc(
+                "recover_intents",
+                observed_action_ids=data.get("observed_action_ids") or [],
+                resolve_observed=bool(data.get("resolve_observed", False))))
+        if path == "/admin/retention":
+            return self._json(200, self.store.rpc(
+                "set_retention", tenant_id=str(data["tenant_id"]),
+                retain_until_after=float(data["retain_until_after"])))
+        if path == "/admin/legal-holds":
+            return self._json(201, self.store.rpc(
+                "add_legal_hold", tenant_id=str(data["tenant_id"]),
+                reason=str(data.get("reason", "legal hold"))))
+        if path == "/admin/privacy/sweep":
+            return self._json(200, self.store.rpc(
+                "run_privacy_sweep", now=data.get("now")))
+        if path == "/admin/test/crash-point":
+            return self._json(200, self.store.rpc(
+                "set_crash_point", point=data.get("point", "")))
+        m = re.fullmatch(r"/admin/legal-holds/([A-Za-z0-9_]+)/release", path)
+        if m:
+            ok = self.store.rpc("release_legal_hold", hold_id=m.group(1))
+            return self._json(200, {"hold_id": m.group(1), "released": ok})
         if path == "/admin/reset":
             self.store.rpc("reset_for_test")
             return self._json(200, {"ok": True})
@@ -564,6 +665,10 @@ class Handler(BaseHTTPRequestHandler):
                 lane_id=data["lane_id"], epoch=int(data["epoch"]),
                 fence=data["fence"], job_id=data.get("job_id"))
             return self._json(200, r)
+        if path == "/test/crash-point":
+            point = str(data.get("point", ""))
+            self.worker.crash_point = point
+            return self._json(200, {"crash_point": point})
         self._err(404, "not_found", "no route")
 
     # ---- Prometheus 指标 ---------------------------------------------

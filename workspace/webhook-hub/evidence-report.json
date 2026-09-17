@@ -1,0 +1,387 @@
+{
+  "generated_at": 1789674116.194967,
+  "scenarios": [
+    {
+      "checks": [
+        {
+          "detail": null,
+          "name": "sequence linkage through 236",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "local chain verification",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "ownership changed multiple times",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "every successful credential has an outbound attempt",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "terminal credentials correspond to actual receiver actions",
+          "ok": true
+        }
+      ],
+      "detail": {
+        "elapsed_seconds": 2.19,
+        "forks_or_gaps": 0,
+        "handoffs": 92,
+        "head_digest": "60bae9adfb5476e4560f44bdccf55c334a9b26bf0ee16334c38d2b854fcadff8",
+        "head_seq": 236,
+        "total_credentials": 236
+      },
+      "id": 1,
+      "ok": true,
+      "title": "双节点高频争用与所有权换手"
+    },
+    {
+      "checks": [
+        {
+          "detail": null,
+          "name": "pre-side-effect crash never reached receiver",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "after-side-effect remains pending before reconciliation",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "reconciler is idempotent and has no duplicate terminal",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "sequence linkage through 21",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "local chain verification",
+          "ok": true
+        }
+      ],
+      "detail": {
+        "elapsed_seconds": 1.53,
+        "forks_or_gaps": 0,
+        "head_digest": "924550234c6d04ecb619ef3b6722dcc9a577343dc6fab168357302eb9eda6f6b",
+        "head_seq": 21,
+        "intent_classification": [
+          {
+            "converged": 1,
+            "outcome_unknown": 0,
+            "safe_to_retry": 1
+          }
+        ],
+        "total_credentials": 21
+      },
+      "id": 2,
+      "ok": true,
+      "title": "副作用前/后及封存途中强杀恢复"
+    },
+    {
+      "checks": [
+        {
+          "detail": null,
+          "name": "lossless bundle verifies",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "sequence linkage through 42",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "local chain verification",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "rewrite detected offline",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "delete detected offline",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "swap detected offline",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "replace-anchor detected offline",
+          "ok": true
+        }
+      ],
+      "detail": {
+        "elapsed_seconds": 0.94,
+        "forks_or_gaps": 0,
+        "head_digest": "9fdee24f85b649f75512ea2af3b573186b93a84291fefcf51027f72c4776d88b",
+        "head_seq": 42,
+        "tamper_locations": {
+          "delete": 5,
+          "replace-anchor": 42,
+          "rewrite": 4,
+          "swap": 5
+        },
+        "total_credentials": 42
+      },
+      "id": 3,
+      "ok": true,
+      "title": "改写、删除、调序、替换锚点离线定位"
+    },
+    {
+      "checks": [
+        {
+          "detail": null,
+          "name": "sequence linkage through 76",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "local chain verification",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "frozen cutoff stable under pressure",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "increment starts immediately after cutoff",
+          "ok": true
+        }
+      ],
+      "detail": {
+        "cutoff_seq": 27,
+        "elapsed_seconds": 1.57,
+        "forks_or_gaps": 0,
+        "head_digest": "c6a1fb0cf1035ba47d7340901a6f9a0c0f717ecb5017eb0e180150bb264b8b0e",
+        "head_seq": 76,
+        "next_cutoff": 82,
+        "total_credentials": 76
+      },
+      "id": 4,
+      "ok": true,
+      "title": "压力写入中一致性导出与增量接续"
+    },
+    {
+      "checks": [
+        {
+          "detail": null,
+          "name": "pre-rotation bundle verifies",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "post-rotation bundle and boundary verify",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "sequence linkage through 11",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "local chain verification",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "forged new anchor with leaked old key fails",
+          "ok": true
+        }
+      ],
+      "detail": {
+        "elapsed_seconds": 0.4,
+        "forks_or_gaps": 0,
+        "head_digest": "9a80036960b3101de0e949ad185a4fb5bffbe993994c454fe04954d8eed50365",
+        "head_seq": 11,
+        "key_generations": 2,
+        "key_history": [
+          {
+            "generation": 0,
+            "public_key": "3d86691eaa827f802ca483ba731280b7a8a1364a36203f1d51603afab8c62ef6",
+            "retired_at": 1789674114.019646,
+            "started_at": 1789674113.7982533
+          },
+          {
+            "generation": 1,
+            "public_key": "013f110543ac6cdc1d7913ea72a190d49c0c8ebae338204db44352d8cd6eb6c6",
+            "retired_at": null,
+            "started_at": 1789674114.019646
+          }
+        ],
+        "rotation_boundary": 5,
+        "total_credentials": 11
+      },
+      "id": 5,
+      "ok": true,
+      "title": "封存私钥换代、旧私钥泄漏与分界证明"
+    },
+    {
+      "checks": [
+        {
+          "detail": null,
+          "name": "active legal hold blocks erasure",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "retained identifiable content still present during hold",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "erasure resumes after release",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "chain remains valid and secret absent after erasure",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "sequence linkage through 6",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "local chain verification",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "action count/order remain provable",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "no original value in exported bytes",
+          "ok": true
+        }
+      ],
+      "detail": {
+        "elapsed_seconds": 0.55,
+        "forks_or_gaps": 0,
+        "head_digest": "49a84682514324bc59110af59eee3ef24ab372961b5292a1e1edf0e304a545c8",
+        "head_seq": 6,
+        "privacy_batches": [
+          {
+            "attachments_redacted": 0,
+            "batch_id": "red_43c810ae5dde077bdee168c8",
+            "events_redacted": 1,
+            "evidence_seq": 6,
+            "status": "complete",
+            "tenant_id": "tnt_978a696b44f4056f1d951c65"
+          }
+        ],
+        "total_credentials": 6
+      },
+      "id": 6,
+      "ok": true,
+      "title": "留存清除、司法留置阻断与恢复"
+    },
+    {
+      "checks": [
+        {
+          "detail": null,
+          "name": "write outage rejects account success",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "sequence linkage through 10",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "local chain verification",
+          "ok": true
+        },
+        {
+          "detail": null,
+          "name": "head agrees with main account terminal state",
+          "ok": true
+        }
+      ],
+      "detail": {
+        "elapsed_seconds": 1.54,
+        "forks_or_gaps": 0,
+        "head_digest": "a409a59d6ac2b84951f98f1f4922ea9eff921c58db091ea047e540eda1884a8e",
+        "head_seq": 10,
+        "recovery": {
+          "converged": 0,
+          "outcome_unknown": 0,
+          "safe_to_retry": 0
+        },
+        "total_credentials": 10
+      },
+      "id": 7,
+      "ok": true,
+      "title": "共享账库短暂拒写与恢复清算"
+    }
+  ],
+  "summary": {
+    "chain_head_digests": [
+      "60bae9adfb5476e4560f44bdccf55c334a9b26bf0ee16334c38d2b854fcadff8",
+      "924550234c6d04ecb619ef3b6722dcc9a577343dc6fab168357302eb9eda6f6b",
+      "9fdee24f85b649f75512ea2af3b573186b93a84291fefcf51027f72c4776d88b",
+      "c6a1fb0cf1035ba47d7340901a6f9a0c0f717ecb5017eb0e180150bb264b8b0e",
+      "9a80036960b3101de0e949ad185a4fb5bffbe993994c454fe04954d8eed50365",
+      "49a84682514324bc59110af59eee3ef24ab372961b5292a1e1edf0e304a545c8",
+      "a409a59d6ac2b84951f98f1f4922ea9eff921c58db091ea047e540eda1884a8e"
+    ],
+    "cutoff_seqs": [
+      27
+    ],
+    "forks_or_gaps": 0,
+    "intent_classification": {
+      "converged": 1,
+      "outcome_unknown": 0,
+      "safe_to_retry": 1
+    },
+    "key_generations": [
+      2
+    ],
+    "key_history": [
+      {
+        "generation": 0,
+        "public_key": "3d86691eaa827f802ca483ba731280b7a8a1364a36203f1d51603afab8c62ef6",
+        "retired_at": 1789674114.019646,
+        "started_at": 1789674113.7982533
+      },
+      {
+        "generation": 1,
+        "public_key": "013f110543ac6cdc1d7913ea72a190d49c0c8ebae338204db44352d8cd6eb6c6",
+        "retired_at": null,
+        "started_at": 1789674114.019646
+      }
+    ],
+    "privacy_leak_scan": [
+      "no-secret-found"
+    ],
+    "tamper_locations": {
+      "delete": 5,
+      "replace-anchor": 42,
+      "rewrite": 4,
+      "swap": 5
+    },
+    "total_credentials": 402
+  }
+}

@@ -30,6 +30,7 @@ class SendResult:
     code: int | None
     error: str | None
     retry_after: float | None
+    response_digest: str = ""
 
 
 def sign(secret: str, signing_text: str) -> str:
@@ -84,15 +85,18 @@ def build_request(target_url: str, *, delivery_id: str, event_id: str,
 def send(req: urllib.request.Request, timeout: float = 2.5) -> SendResult:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            resp.read()
+            body = resp.read()
             code = resp.getcode()
-        return SendResult(200 <= code < 300, False, code, None, None)
+        digest = hashlib.sha256(body or b"").hexdigest()
+        return SendResult(200 <= code < 300, False, code, None, None, digest)
     except urllib.error.HTTPError as e:
-        e.read()
+        body = e.read()
         retry_after = None
         if e.code in RESPECT_RETRY_AFTER:
             retry_after = _parse_retry_after(e.headers.get("Retry-After"))
-        return SendResult(False, e.code in RETRY_STATUS, e.code, None, retry_after)
+        digest = hashlib.sha256(body or b"").hexdigest()
+        return SendResult(False, e.code in RETRY_STATUS, e.code, None,
+                          retry_after, digest)
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         reason = getattr(e, "reason", e)
         return SendResult(False, True, None, str(reason), None)
