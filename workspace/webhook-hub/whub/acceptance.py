@@ -135,7 +135,8 @@ class Cluster:
             start_new_session=True)
         self.procs[key] = p
 
-    def start(self, seed: bool = False) -> None:
+    def start(self, seed: bool = False, cred_key_path: str | None = None,
+              anchor_interval: float | None = None) -> None:
         common = {
             "WHUB_LEASE_TTL": str(self.ttl),
             "WHUB_RENEW_INTERVAL": str(max(self.ttl / 3, 0.3)),
@@ -151,11 +152,18 @@ class Cluster:
             "WHUB_DRAIN_DEADLINE": str(self.ttl * 3),
             "WHUB_MAX_WORKERS": "64",
         }
+        if cred_key_path:
+            common["WHUB_CRED_KEY"] = cred_key_path
+        if anchor_interval is not None:
+            common["WHUB_ANCHOR_INTERVAL"] = str(anchor_interval)
         self._spawn("sink", ["sink", "--port", str(self.sink_port)], common)
         self._spawn("store", [
             "store", "--host", "127.0.0.1", "--port", str(self.store_port)],
             {**common, "WHUB_DB": os.path.join(self.dir, "store.db"),
              "WHUB_SEED": "0"})
+        self.store_env_extra = {
+            k: v for k, v in common.items()
+            if k in ("WHUB_CRED_KEY", "WHUB_ANCHOR_INTERVAL")}
         wait_for(f"{self.store}/healthz")
         wait_for(f"{self.sink}/healthz")
         for w, port in self.worker_ports.items():
@@ -220,6 +228,39 @@ class Cluster:
             "worker", f"--worker-id=worker-{w}",
             "--host", "127.0.0.1", "--port", str(port)], env)
         wait_for(f"{self.worker_url(w)}/healthz")
+
+    def restart_store(self, env_extra: dict | None = None) -> None:
+        """杀掉并重启 store 进程（模拟封存途中强杀主账）。"""
+        old = self.procs.get("store")
+        if old and old.poll() is None:
+            os.killpg(os.getpgid(old.pid), signal.SIGKILL)
+            old.wait(timeout=5)
+        env = {
+            "WHUB_LEASE_TTL": str(self.ttl),
+            "WHUB_RENEW_INTERVAL": str(max(self.ttl / 3, 0.3)),
+            "WHUB_HEARTBEAT_INTERVAL": str(max(self.ttl / 4, 0.3)),
+            "WHUB_SWEEP_INTERVAL": "0.15",
+            "WHUB_ACQUIRE_BUDGET": str(self.acquire_budget),
+            "WHUB_REBALANCE_BUDGET": str(self.rebalance_budget),
+            "WHUB_RENEW_JITTER": "0.05",
+            "WHUB_HTTP_TIMEOUT": "3",
+            "WHUB_BACKOFF_BASE": "0.2",
+            "WHUB_BACKOFF_CAP": "8",
+            "WHUB_SEED": "0",
+            "WHUB_DRAIN_DEADLINE": str(self.ttl * 3),
+            "WHUB_DB": os.path.join(self.dir, "store.db"),
+            **getattr(self, "store_env_extra", {}),
+            **(env_extra or {}),
+        }
+        logfile = open(os.path.join(self.dir, "log", "store.log"), "ab")
+        p = subprocess.Popen(
+            [sys.executable, "-m", "whub", "store",
+             "--host", "127.0.0.1", "--port", str(self.store_port)],
+            cwd=ROOT, env={**os.environ, **env}, stdout=logfile,
+            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            start_new_session=True)
+        self.procs["store"] = p
+        wait_for(f"{self.store}/healthz")
 
     def stop(self) -> None:
         for key, p in list(self.procs.items()):

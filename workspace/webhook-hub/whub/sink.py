@@ -99,6 +99,8 @@ class SinkHandler(BaseHTTPRequestHandler):
             return self._add_key()
         if path == "/admin/reset":
             return self._reset()
+        if path == "/admin/observed":
+            return self._observed()
         if path.startswith("/admin/"):
             self._json(404, {"error": "no route"})
             return
@@ -141,6 +143,21 @@ class SinkHandler(BaseHTTPRequestHandler):
             if not data.get("keep_rules"):
                 st.rules.clear()
         self._json(200, {"ok": True})
+
+    def _observed(self) -> None:
+        """对账探针：给定 event_id（可多个），返回对方是否已实际确认。
+
+        供 store 对账器区分 safe_retry（对方未见）与 in_doubt（对方已见
+        但本地无终态）。只回布尔，不回任何请求正文。"""
+        data = json.loads(self._read_body() or b"{}")
+        ids = data.get("event_ids") or ([data["event_id"]]
+                                        if data.get("event_id") else [])
+        with self.state.lock:
+            observed = {}
+            for eid in ids:
+                hit = any(eid in m for m in self.state.seen.values())
+                observed[eid] = hit
+        self._json(200, {"observed": observed})
 
     # -- webhook entry -------------------------------------------------
 

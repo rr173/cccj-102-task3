@@ -305,11 +305,18 @@ class Worker:
                 with self._lock:
                     self.busy_lanes.discard(lane_id)
                 continue
-            self.pool.submit(self._deliver, lane_id, job, tok.epoch, tok.fence)
+            attempt_no = job["attempts"]
+            self.pool.submit(self._deliver, lane_id, job, tok.epoch,
+                             tok.fence, attempt_no)
 
     # ---- 一次发送（严格 fence + 不可变快照） --------------------------
 
-    def _deliver(self, lane_id: str, job: dict, epoch: int, fence: str) -> None:
+    # 故障注入：非空时在指定阶段以 os._exit 自杀（等价 kill -9，无 finally），
+    # 供对账验收覆盖“副作用前 / 副作用后”崩溃窗口。
+    crash_at = ""   # "" | "before_side_effect" | "after_side_effect"
+
+    def _deliver(self, lane_id: str, job: dict, epoch: int, fence: str,
+                 attempt_no: int = 1) -> None:
         done = False
         try:
             # 出站前 fence 探针：写事务。store outage 或 fence 陈旧 => 绝不发送。
@@ -329,6 +336,11 @@ class Worker:
                 # job 在 DB 仍为 leased，租约过期后由继任者重发
                 return
 
+            # 故障注入：副作用之前崩溃（意图已 tx1 落库，主账 job=leased）
+            if self.crash_at == "before_side_effect":
+                log.error("FAULT: crash BEFORE side effect %s", job["id"])
+                self._crash_hard()
+
             ver = self.store.rpc("delivery_secret", eid=job["endpoint_id"],
                                  version=job["sig_version"])
             ev = self.store.rpc("event", event_id=job["event_id"])
@@ -344,7 +356,24 @@ class Worker:
                 seq=job["seq"], payload=ev["payload"],
                 secret=ver["secret"], sig_version=job["sig_version"])
             result = send(req, timeout=self.cfg.http_timeout)
-            done = self._settle(lane_id, job, epoch, fence, result)
+
+            # 副作用已返回：标记 sent（缩小结局待查窗口；失败不影响主流程）
+            kind = "ack" if result.ok else (
+                "nack" if result.code is not None else "transport")
+            try:
+                self.store.rpc("mark_attempt_sent", job_id=job["id"],
+                               attempt_no=attempt_no,
+                               code=result.code or 0, kind=kind)
+            except StoreError:
+                pass
+
+            # 故障注入：副作用之后、终态事务之前崩溃（结局待查窗口）
+            if self.crash_at == "after_side_effect":
+                log.error("FAULT: crash AFTER side effect %s ok=%s",
+                          job["id"], result.ok)
+                self._crash_hard()
+
+            done = self._settle(lane_id, job, epoch, fence, result, attempt_no)
         except StaleEpoch:
             log.warning("job %s result dropped: stale fence (new owner wins)",
                         job["id"])
@@ -364,12 +393,20 @@ class Worker:
     def _object_key(job: dict, ev: dict) -> str:
         return ev.get("object_key") or f"lane-{job['lane_id']}"
 
-    def _settle(self, lane_id, job, epoch, fence, result) -> bool:
+    @staticmethod
+    def _crash_hard() -> None:
+        """以 os._exit(1) 模拟 kill -9：无 finally、无优雅回写。"""
+        import os
+        os._exit(1)
+
+    def _settle(self, lane_id, job, epoch, fence, result,
+                attempt_no: int = 1) -> bool:
         """回写结果。三类终态/退避都携带 identical fence；返回是否已结算。"""
         if result.ok:
             self.store.rpc("complete_success", job_id=job["id"],
                            worker_id=self.wid, epoch=epoch, fence=fence,
-                           code=result.code or 200)
+                           code=result.code or 200,
+                           peer_event_id=job["event_id"])
             self.local["sent_ok"] += 1
             return True
         if result.retryable:

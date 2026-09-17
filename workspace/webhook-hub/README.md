@@ -229,6 +229,42 @@ whub/
   e2e.py         旧功能端到端验收
   main.py        CLI：hub | store | worker | sink | acceptance | e2e
   test_core.py   引擎 fence/epoch/序号/快照/写闸门单元测试
+  cred_crypto.py 凭证密码学基座：规范编码/域隔离摘要/纯标准库 Ed25519
+  cred.py        防篡改凭证账：连续摘要链/意图两阶段/锚点/换代/留存/清除
+  cred_keystore.py 封存私钥代次化 keystore（0600，私钥绝不进库/包/审计）
+  cred_seal.py   周期锚点封存 + 旧私钥签换代证书
+  cred_export.py 一致性导出（冻结截止序号/增量接续，.whubpkg）
+  cred_verify.py 离线核验器：改写/删除/插入/调序/伪锚点定位到首个失信序号
+  cred_service.py store 进程周期封存后台线程
+  cred_acceptance.py 凭证册 7 场景真实双进程验收 + 机器可读报告
+  test_cred.py   凭证册离线单元测试
 run.sh           兼容单进程入口（hub+sink / e2e）
 run-ha.sh        HA 入口（acceptance 自起集群，或 up 常驻四进程）
+run-cred-tests.sh 凭证册一键复现（单元测试 + 7 场景验收）
+docs/tamper-evident-credentials.md 凭证册设计：规范编码/摘要域/原子分界/
+                 恢复判定/私钥换代/导出核验/留存
 ```
+
+---
+
+## 防篡改凭证册（离线可核验）
+
+每个客户账户一条连续摘要链（消息入账 / 所有权交接 / 出站尝试 / 对方应答 /
+操作员再执行 / 跳过），链头由 Ed25519 周期锚点封存，私钥可换代、分界可
+离线证明；支持一致性导出（冻结截止、增量接续）、留存抹除与司法留置。
+核验者只凭导出包与包内公开材料即可发现改写/删除/插入/调序/伪锚点并指出
+首个失信序号；正文、私钥、口令绝不入链。
+
+```bash
+# 一键复现：离线单元测试 + 真实双进程 7 场景验收 + 结构化报告
+./run-cred-tests.sh
+
+# 或分步
+python3 -m unittest whub.test_cred whub.test_core -v
+python3 -m whub cred-acceptance                 # -> cred-acceptance-report.json
+python3 -m whub verify exp_xxx.whubpkg          # 离线核验单个导出包
+```
+
+运维面：`/admin/cred/overview|intents|exports|audit|generations`，
+`POST /admin/cred/anchor|rotate-keys|export|reconcile|retention|legal-hold|scrub`。
+设计细节见 `docs/tamper-evident-credentials.md`。

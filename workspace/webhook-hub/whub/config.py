@@ -55,6 +55,10 @@ class HubConfig:
     backoff_base: float = 0.5
     backoff_cap: float = 30.0
 
+    # ---- 凭证册 ----
+    cred_key_path: str = "/tmp/whub/seal.json"   # 封存私钥 keystore（0600）
+    anchor_interval: float = 30.0                # 周期锚点封存间隔（秒）
+
     # ---- 进程角色 ----
     store_url: str = ""               # 非空 => 连远端 store；空 => 进程内 store
     worker_id: str = ""               # 空 => 单 worker 模式的固定 id
@@ -84,6 +88,9 @@ class HubConfig:
         c.backoff_cap = _env_float("WHUB_BACKOFF_CAP", c.backoff_cap)
         c.store_url = os.environ.get("WHUB_STORE_URL", c.store_url)
         c.worker_id = os.environ.get("WHUB_WORKER_ID", c.worker_id)
+        c.cred_key_path = os.environ.get("WHUB_CRED_KEY", c.cred_key_path)
+        c.anchor_interval = _env_float("WHUB_ANCHOR_INTERVAL",
+                                       c.anchor_interval)
         c.admin_token = os.environ.get("WHUB_ADMIN_TOKEN", c.admin_token)
         c.freeze_support = os.environ.get(
             "WHUB_FREEZE_SUPPORT", "1") not in ("0", "false", "False")

@@ -25,6 +25,16 @@ log = logging.getLogger("whub.api")
 METRIC_NAMES = ("acquire", "renew", "steal", "stale_write_rejected",
                 "drain_handoff", "orphan_recovered")
 
+# 凭证侧监控项（运维面/metrics 暴露）
+CRED_METRIC_LABELS = {
+    "credential_appends": "whub_cred_appends_total",
+    "intent_recoveries": "whub_cred_intent_recoveries_total",
+    "tamper_findings": "whub_cred_tamper_findings_total",
+    "anchor_seals": "whub_cred_anchor_seals_total",
+    "export_cutoffs": "whub_cred_export_cutoffs_total",
+    "privacy_scrubs": "whub_cred_privacy_scrubs_total",
+}
+
 
 def lane_key(eid: str, object_key: str) -> str:
     return "ln_" + hashlib.sha1(f"{eid}|{object_key}".encode()).hexdigest()[:24]
@@ -508,6 +518,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, self.store.rpc("counters"))
         if path == "/admin/orphans":
             return self._json(200, self.store.rpc("orphan_lanes"))
+        if path == "/admin/cred/overview":
+            return self._cred_overview()
+        if path == "/admin/cred/intents":
+            return self._json(200, self.store.rpc("intents_view"))
+        if path == "/admin/cred/exports":
+            return self._json(200, self.store.rpc("cred_exports"))
+        if path == "/admin/cred/audit":
+            return self._json(200, self.store.rpc("cred_audit_tail", limit=100))
+        if path == "/admin/cred/generations":
+            return self._json(200, self.store.rpc("cred_generations"))
         self._err(404, "not_found", "no route")
 
     def _admin_post(self, path: str) -> None:
@@ -528,6 +548,24 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/reset":
             self.store.rpc("reset_for_test")
             return self._json(200, {"ok": True})
+        if path == "/admin/cred/anchor":
+            return self._cred_anchor(data)
+        if path == "/admin/cred/crash-anchor":
+            return self._cred_crash_anchor()
+        if path == "/admin/cred/pause-anchor":
+            return self._cred_pause_anchor(data)
+        if path == "/admin/cred/rotate-keys":
+            return self._cred_rotate()
+        if path == "/admin/cred/export":
+            return self._cred_export(data)
+        if path == "/admin/cred/reconcile":
+            return self._cred_reconcile(data)
+        if path == "/admin/cred/retention":
+            return self._cred_retention(data)
+        if path == "/admin/cred/legal-hold":
+            return self._cred_legal_hold(data)
+        if path == "/admin/cred/scrub":
+            return self._cred_scrub(data)
         m = re.fullmatch(r"/admin/workers/([A-Za-z0-9_.-]+)/drain", path)
         if m:
             wid = m.group(1)
@@ -538,6 +576,150 @@ class Handler(BaseHTTPRequestHandler):
                                deadline=float(deadline) if deadline else None)
             return self._json(200, r)
         self._err(404, "not_found", "no route")
+
+    # ---- 控制面：防篡改凭证册 -----------------------------------------
+
+    def _cred_services(self):
+        """延迟取得 store 进程内的封存/导出服务（worker 进程没有）。"""
+        engine = getattr(self.server, "engine", None)
+        svc = getattr(self.server, "cred_services", None)
+        return engine, svc
+
+    def _cred_overview(self) -> None:
+        accounts = self.store.rpc("cred_accounts")
+        out = []
+        for a in accounts:
+            latest = self.store.rpc("cred_latest_anchor",
+                                    account_id=a["account_id"])
+            chain = self.store.rpc("cred_verify_chain",
+                                   account_id=a["account_id"])
+            out.append({
+                "account_id": a["account_id"],
+                "head_seq": a["head_seq"],
+                "head_digest": a["head_digest"],
+                "latest_anchor_no": latest["anchor_no"] if latest else None,
+                "latest_anchor_gen": latest["gen"] if latest else None,
+                "latest_anchor_seq_upto":
+                    latest["seq_upto"] if latest else None,
+                "chain_ok": chain["ok"],
+                "first_bad_seq": chain.get("first_bad_seq"),
+                "retention": self.store.rpc(
+                    "retention_view", tenant_id=a["account_id"]),
+                "scrub": self.store.rpc(
+                    "scrub_progress", tenant_id=a["account_id"]),
+            })
+        pending = self.store.rpc("intents_view")
+        exports = self.store.rpc("cred_exports")
+        self._json(200, {
+            "accounts": out,
+            "pending_intents": pending,
+            "pending_intent_count": len(pending),
+            "exports": exports[-20:],
+            "metrics": self.store.rpc("cred_metrics"),
+            "generations": self.store.rpc("cred_generations"),
+            "verification_conclusion": (
+                "all_chains_ok" if all(x["chain_ok"] for x in out)
+                else "TAMPER_DETECTED"),
+        })
+
+    def _require_services(self):
+        engine, svc = self._cred_services()
+        if engine is None or svc is None:
+            self._err(503, "store_only",
+                      "credential services live on the durable store process")
+            return None, None
+        return engine, svc
+
+    def _cred_anchor(self, data: dict) -> None:
+        _, svc = self._require_services()
+        if svc is None:
+            return
+        account = data.get("account_id")
+        if not account:
+            return self._err(400, "bad_request", "account_id required")
+        try:
+            r = svc["sealer"].seal_account(account, force=bool(data.get("force")))
+        except Exception as e:
+            return self._err(400, "seal_failed", str(e))
+        self._json(200, r if r else {"sealed": False, "reason": "no new records"})
+
+    def _cred_crash_anchor(self) -> None:
+        """一次性故障注入：下一次锚点事务在提交前硬退出（模拟封存途中强杀）。"""
+        engine, _ = self._require_services()
+        if engine is None:
+            return
+        engine.cred._crash_after_anchor = True
+        self._json(202, {"armed": True})
+
+    def _cred_pause_anchor(self, data: dict) -> None:
+        _, svc = self._require_services()
+        if svc is None:
+            return
+        svc["anchor"].set_paused(bool(data.get("paused", True)))
+        self._json(200, {"paused": bool(data.get("paused", True))})
+
+    def _cred_rotate(self) -> None:
+        _, svc = self._require_services()
+        if svc is None:
+            return
+        self._json(200, svc["sealer"].rotate())
+
+    def _cred_export(self, data: dict) -> None:
+        _, svc = self._require_services()
+        if svc is None:
+            return
+        account = data.get("account_id")
+        if not account:
+            return self._err(400, "bad_request", "account_id required")
+        r = svc["exporter"].export(
+            account_id=account, out_dir=data.get("out_dir", "/tmp/whub/exports"),
+            seq_from=int(data.get("seq_from", 1)),
+            incremental_of=data.get("incremental_of"))
+        if r.get("error"):
+            return self._err(400, "export_failed", r["error"], **r)
+        self._json(201, r)
+
+    def _cred_reconcile(self, data: dict) -> None:
+        engine, _ = self._require_services()
+        if engine is None:
+            return
+        summary = engine.reconcile_intents(peer_probe=None)
+        self._json(200, summary)
+
+    def _cred_retention(self, data: dict) -> None:
+        engine, _ = self._require_services()
+        if engine is None:
+            return
+        account = data.get("account_id")
+        if not account:
+            return self._err(400, "bad_request", "account_id required")
+        r = engine.set_retention(
+            account, retain_seconds=data.get("retain_seconds"))
+        self._json(200, r)
+
+    def _cred_legal_hold(self, data: dict) -> None:
+        engine, _ = self._require_services()
+        if engine is None:
+            return
+        account = data.get("account_id")
+        if not account:
+            return self._err(400, "bad_request", "account_id required")
+        r = engine.set_retention(
+            account, legal_hold=bool(data.get("legal_hold", True)),
+            hold_reason=data.get("reason"))
+        self._json(200, r)
+
+    def _cred_scrub(self, data: dict) -> None:
+        engine, _ = self._require_services()
+        if engine is None:
+            return
+        account = data.get("account_id")
+        if not account:
+            return self._err(400, "bad_request", "account_id required")
+        r = engine.scrub_privacy(
+            account, batch_size=int(data.get("batch_size", 100)),
+            ttl_override=data.get("ttl_seconds"))
+        self._json(200, r)
 
     # ---- worker 自身视图 / 测试注入 ----------------------------------
 
@@ -559,6 +741,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/test/freeze":
             until = self.worker.freeze(float(data.get("seconds", 5)))
             return self._json(202, {"freezing": True, "resume_at": until})
+        if path == "/test/crash-point":
+            # 设定下一次 _deliver 的自杀点（before/after side effect）
+            point = str(data.get("point", ""))
+            if point not in ("", "before_side_effect", "after_side_effect"):
+                return self._err(400, "bad_request", "invalid point")
+            self.worker.crash_at = point
+            return self._json(200, {"crash_at": point})
         if path == "/test/stale-attempts":
             r = self.worker.stale_attempts(
                 lane_id=data["lane_id"], epoch=int(data["epoch"]),
@@ -600,6 +789,14 @@ class Handler(BaseHTTPRequestHandler):
         lines.append("# TYPE whub_orphan_lanes gauge")
         lines.append(
             f'whub_orphan_lanes {len(self.store.rpc("orphan_lanes"))}')
+        # 凭证册监控项
+        try:
+            cm = self.store.rpc("cred_metrics")
+            lines.append("# TYPE whub_cred_events counter")
+            for name, prom in CRED_METRIC_LABELS.items():
+                lines.append(f"{prom} {cm.get(name, 0)}")
+        except Exception:
+            pass
         body = "\n".join(lines) + "\n"
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; version=0.0.4")

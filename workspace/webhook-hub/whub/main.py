@@ -47,11 +47,25 @@ def run_hub(args) -> int:
     store = DirectClient(engine)
     if cfg.seed:
         _seed_if_needed(store)
+    # 单进程 hub 也引导凭证封存（内嵌 store 角色）
+    from .cred_keystore import KeyStore as _KeyStore
+    from .cred_seal import Sealer as _Sealer
+    from .cred_export import Exporter as _Exporter
+    from .cred_service import AnchorService as _AnchorService
+    _keystore = _KeyStore(cfg.cred_key_path)
+    _sealer = _Sealer(engine.cred, _keystore)
+    _sealer.bootstrap()
+    _exporter = _Exporter(engine.cred, _keystore, _sealer)
+    _anchor_svc = _AnchorService(_sealer, _exporter, cfg.anchor_interval)
+    _anchor_svc.start()
     worker = Worker(cfg.worker_id or "worker-solo", store, cfg,
                     host=cfg.host, port=cfg.port)
     worker.start()
     server = HubServer((cfg.host, cfg.port), store, cfg, worker=worker,
                        engine=engine)
+    server.cred_services = {"sealer": _sealer, "exporter": _exporter,
+                            "keystore": _keystore,
+                            "anchor": _anchor_svc}
     logging.getLogger("whub").info(
         "hub (single-worker, embedded store) on %s:%s db=%s",
         cfg.host, cfg.port, cfg.db_path)
@@ -61,6 +75,7 @@ def run_hub(args) -> int:
         pass
     finally:
         worker.stop()
+        _anchor_svc.stop()
         server.server_close()
         engine.close()
     return 0
@@ -81,9 +96,23 @@ def run_store(args) -> int:
     store = DirectClient(engine)
     if cfg.seed and args.seed:
         _seed_if_needed(store)
+    # 凭证封存服务：keystore 引导 + 周期锚点（仅 store 进程持有私钥）
+    from .cred_keystore import KeyStore
+    from .cred_seal import Sealer
+    from .cred_export import Exporter
+    from .cred_service import AnchorService
+    keystore = KeyStore(cfg.cred_key_path)
+    sealer = Sealer(engine.cred, keystore)
+    sealer.bootstrap()
+    exporter = Exporter(engine.cred, keystore, sealer)
+    anchor_svc = AnchorService(sealer, exporter, cfg.anchor_interval)
+    anchor_svc.start()
     # store 进程：完整业务/控制面 + /rpc 透传，不运行 worker
     server = HubServer((cfg.host, cfg.port), store, cfg, worker=None,
                        engine=engine, enable_rpc=True)
+    server.cred_services = {"sealer": sealer, "exporter": exporter,
+                            "keystore": keystore,
+                            "anchor": anchor_svc}
     logging.getLogger("whub").info(
         "durable store on %s:%s db=%s (ttl=%ss renew=%ss budget=%s/%s)",
         cfg.host, cfg.port, cfg.db_path, cfg.lease_ttl, cfg.renew_interval,
@@ -93,6 +122,7 @@ def run_store(args) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        anchor_svc.stop()
         server.server_close()
         engine.close()
     return 0
@@ -169,6 +199,28 @@ def run_e2e(args) -> int:
         return 2
 
 
+def run_cred_acceptance(args) -> int:
+    from .cred_acceptance import CredAcceptance
+    return CredAcceptance(ttl=args.ttl, report_path=args.report,
+                          scenarios=args.scenarios).run()
+
+
+def run_verify(args) -> int:
+    """离线核验导出包：只凭包内公开材料，不连任何服务。"""
+    import json
+    from .cred_verify import verify_package
+    v = verify_package(
+        args.package, expected_account=args.account or None,
+        prev_head_digest=args.prev_head or None,
+        prev_cutoff=args.prev_cutoff)
+    text = json.dumps(v, ensure_ascii=False, indent=2)
+    print(text)
+    if args.report:
+        with open(args.report, "w") as f:
+            f.write(text + "\n")
+    return 0 if v.get("ok") else 3
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="whub")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -207,6 +259,21 @@ def main(argv=None) -> int:
     e.add_argument("--hub", default="http://127.0.0.1:8080")
     e.add_argument("--sink", default="http://127.0.0.1:9000")
     e.set_defaults(func=run_e2e)
+
+    ca = sub.add_parser("cred-acceptance",
+                        help="防篡改凭证册 7 场景验收（真实双进程+离线核验）")
+    ca.add_argument("--ttl", type=float, default=4.0)
+    ca.add_argument("--report", default="cred-acceptance-report.json")
+    ca.add_argument("--scenarios", default="", help="逗号分隔 1..7")
+    ca.set_defaults(func=run_cred_acceptance)
+
+    v = sub.add_parser("verify", help="离线核验 .whubpkg 导出包（不连服务）")
+    v.add_argument("package")
+    v.add_argument("--account", default=None)
+    v.add_argument("--prev-head", default=None, help="增量包：上一包链头")
+    v.add_argument("--prev-cutoff", type=int, default=None)
+    v.add_argument("--report", default=None)
+    v.set_defaults(func=run_verify)
 
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)

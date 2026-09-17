@@ -19,12 +19,18 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import secrets
 import sqlite3
 import threading
 import time
 from typing import Any, Callable, Optional
+
+from .cred import (
+    RECORD_HANDOFF, RECORD_INGEST, RECORD_REPLAY, RECORD_SKIP,
+)
 
 log = logging.getLogger("whub.lease")
 
@@ -201,7 +207,8 @@ class Engine:
 
     def __init__(self, path: str):
         self._lock = threading.RLock()
-        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn = sqlite3.connect(path, check_same_thread=False,
+                                    isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA busy_timeout=10000;")
@@ -209,6 +216,13 @@ class Engine:
         with self._lock:
             self.conn.executescript(SCHEMA)
             self.conn.commit()
+        # 防篡改凭证册：同一 SQLite 文件 => 凭证追加可与主账状态同事务。
+        from .cred import Ledger
+        self.cred = Ledger(
+            self.conn,
+            reject_flag=lambda: self.reject_writes,
+            clock=self._clock_now,
+            shared_lock=self._lock)
         # 写闸门：True 时一切写事务失败（store outage 注入）
         self.reject_writes = False
         self.started_at = time.time()
@@ -427,6 +441,18 @@ class Engine:
                 "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (job_id, eid, lane_id, event_id, seq, v["version"], v["url"],
                  v["kid"], now, now))
+            # 凭证：消息入账。只存正文的 SHA256/长度等不可反推材料，
+            # 正文本身绝不进凭证。
+            payload_digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            self.cred.append_record(
+                c, now, tenant_id, RECORD_INGEST,
+                {"event_id": event_id, "delivery_id": job_id,
+                 "endpoint_id": eid, "lane_id": lane_id,
+                 "object_key": object_key, "lane_seq": seq,
+                 "payload_sha256": payload_digest,
+                 "payload_bytes": len(payload.encode("utf-8")),
+                 "sig_version": v["version"], "kid": v["kid"]},
+                action_id=job_id)
             # lane 行上的水位快照始终跟踪“队头 job”：此前没有未完成 job 时，
             # 新快照就是队头；否则保持旧队头快照，直到队头结算后刷新。
             unfinished = c.execute(
@@ -575,8 +601,29 @@ class Engine:
             "UPDATE jobs SET status='pending', leased_by=NULL, lease_epoch=NULL,"
             " fence_id=NULL, leased_until=NULL, updated_at=? "
             "WHERE lane_id=? AND status='leased'", (now, lane_id))
+        self._cred_handoff(c, now, lane, new_owner, new_epoch, reason)
         self._log_ownership(c, now, lane, new_owner, new_epoch, reason)
         return True
+
+    def _cred_handoff(self, c, now, lane: sqlite3.Row, new_owner,
+                      new_epoch: int, reason: str) -> None:
+        """所有权交接凭证（每个相关客户账户各一条；不含任何秘密）。"""
+        try:
+            ep = c.execute(
+                "SELECT tenant_id FROM endpoints WHERE id=?",
+                (lane["endpoint_id"],)).fetchone()
+            tenant_id = ep["tenant_id"] if ep else None
+        except Exception:
+            tenant_id = None
+        if not tenant_id:
+            return
+        self.cred.append_record(
+            c, now, tenant_id, RECORD_HANDOFF,
+            {"lane_id": lane["lane_id"], "endpoint_id": lane["endpoint_id"],
+             "object_key": lane["object_key"],
+             "old_owner": lane["owner_id"], "new_owner": new_owner,
+             "old_epoch": lane["lease_epoch"], "new_epoch": new_epoch,
+             "reason": reason}, action_id=None)
 
     def _release_lane(self, c, now, lane: sqlite3.Row,
                       reason: str = "release") -> None:
@@ -585,6 +632,7 @@ class Engine:
             "UPDATE lanes SET owner_id=NULL, fence_id=NULL, expires_at=NULL,"
             "draining=0, last_handoff_reason=?, updated_at=? "
             "WHERE lane_id=?", (reason, now, lane["lane_id"]))
+        self._cred_handoff(c, now, lane, None, lane["lease_epoch"], reason)
         self._log_ownership(c, now, lane, None, lane["lease_epoch"], reason)
         c.execute(
             "UPDATE jobs SET status='pending', leased_by=NULL, lease_epoch=NULL,"
@@ -857,9 +905,37 @@ class Engine:
                 (worker_id, epoch, fence, lane["expires_at"], now, head["id"]))
             if cur.rowcount == 0:
                 return None
-            return c.execute("SELECT * FROM jobs WHERE id=?",
-                             (head["id"],)).fetchone()
+            job = c.execute("SELECT * FROM jobs WHERE id=?",
+                            (head["id"],)).fetchone()
+            # 凭证 tx1（副作用之前）：登记出站意图 + pending 的 attempt。
+            # 此刻绝不记录成功；崩溃在此之后、发送之前 => 安全再试。
+            attempt_no = job["attempts"]
+            action_id = self.action_id(job["id"], attempt_no)
+            self.cred.begin_intent(
+                c, now, account_id=self._tenant_for_job(c, job["id"]),
+                action_id=action_id, lane_id=job["lane_id"],
+                job_id=job["id"], attempt_no=attempt_no,
+                body={"delivery_id": job["id"], "event_id": job["event_id"],
+                      "lane_id": job["lane_id"], "lane_seq": job["seq"],
+                      "endpoint_id": job["endpoint_id"],
+                      "attempt": attempt_no, "worker_id": worker_id,
+                      "lease_epoch": epoch, "kid": job["kid"],
+                      "sig_version": job["sig_version"],
+                      "phase": "pre_side_effect"})
+            return job
         return self._write(tx)
+
+    @staticmethod
+    def action_id(job_id: str, attempt_no: int) -> str:
+        """一次出站尝试的确定性幂等键（job + 第几次尝试）。"""
+        return f"{job_id}:a{attempt_no}"
+
+    @staticmethod
+    def _tenant_for_job(c, job_id: str) -> str:
+        row = c.execute(
+            "SELECT e.tenant_id AS tid FROM jobs j JOIN endpoints e "
+            "ON e.id=j.endpoint_id WHERE j.id=?", (job_id,)).fetchone()
+        return row["tid"] if row else "unknown"
 
     def _fence_job(self, c, now, job_id, worker_id, epoch, fence,
                    set_sql: str, args: tuple, metric_reject: bool = True):
@@ -878,7 +954,9 @@ class Engine:
         return lane
 
     def complete_success(self, job_id: str, worker_id: str, epoch: int,
-                         fence: str, code: int) -> dict:
+                         fence: str, code: int,
+                         peer_event_id: Optional[str] = None,
+                         response_bytes: int = 0) -> dict:
         def tx(c, now):
             lane = self._fence_job(
                 c, now, job_id, worker_id, epoch, fence,
@@ -887,8 +965,33 @@ class Engine:
                 "leased_until=NULL, updated_at=?",
                 (code, now))
             self._refresh_lane_head(c, lane["lane_id"], now)
-            return {"job_id": job_id, "status": "succeeded"}
+            # 凭证 tx2：对方应答 + 唯一终态成功凭证（幂等，绝不双份）。
+            attempt_no = lane["attempts"]
+            action_id = self.action_id(job_id, attempt_no)
+            self.cred.finalize_success(
+                c, now, account_id=self._tenant_for_job(c, job_id),
+                action_id=action_id, code=code, peer_event=peer_event_id,
+                response_body_meta={"response_bytes": response_bytes,
+                                    "worker_id": worker_id,
+                                    "lease_epoch": epoch})
+            return {"job_id": job_id, "status": "succeeded",
+                    "action_id": action_id}
         return self._write(tx)
+
+    def mark_attempt_sent(self, job_id: str, attempt_no: int, code: int,
+                          kind: str) -> None:
+        """副作用已返回、终态事务尚未提交时的“sent”标记（缩小待查窗口）。
+
+        非 fence 写：只更新本节点刚 claim 的意图行；终态仍由
+        complete_* 在 fence 事务内收敛。"""
+        def tx(c, now):
+            self.cred.mark_sent(c, now, self.action_id(job_id, attempt_no),
+                                code, kind)
+        try:
+            self._write(tx)
+        except Exception:
+            # 标记失败不影响主流程：对账器会把它保守判为 in_doubt/safe_retry
+            log.debug("mark_attempt_sent failed for %s", job_id, exc_info=True)
 
     def complete_retry(self, job_id: str, worker_id: str, epoch: int,
                        fence: str, code: Optional[int], error: str,
@@ -904,7 +1007,18 @@ class Engine:
             c.execute(
                 "UPDATE lanes SET not_before=MAX(not_before,?), updated_at=? "
                 "WHERE lane_id=?", (not_before, now, lane["lane_id"]))
-            return {"job_id": job_id, "status": "pending", "not_before": not_before}
+            # 凭证：对可重试失败只记应答（非终态），意图退回 safe_retry，
+            # 绝不把“尚未被对方确认成功”记成成功。
+            attempt_no = lane["attempts"]
+            action_id = self.action_id(job_id, attempt_no)
+            self.cred.finalize_failure(
+                c, now, account_id=self._tenant_for_job(c, job_id),
+                action_id=action_id, code=code,
+                kind="nack" if code is not None else "transport",
+                reason_class=("http_" + str(code)) if code is not None
+                else "transport_error", terminal=False)
+            return {"job_id": job_id, "status": "pending",
+                    "not_before": not_before, "action_id": action_id}
         return self._write(tx)
 
     def complete_dead(self, job_id: str, worker_id: str, epoch: int,
@@ -916,10 +1030,19 @@ class Engine:
                 "leased_by=NULL, lease_epoch=NULL, fence_id=NULL, leased_until=NULL,"
                 "updated_at=?", (code, error, now))
             self._refresh_lane_head(c, lane["lane_id"], now)
-            return {"job_id": job_id, "status": "dead"}
+            # 凭证：永久失败终态（队头阻塞，等人工 replay/skip）。
+            attempt_no = lane["attempts"]
+            action_id = self.action_id(job_id, attempt_no)
+            self.cred.finalize_failure(
+                c, now, account_id=self._tenant_for_job(c, job_id),
+                action_id=action_id, code=code,
+                kind="nack" if code else "transport",
+                reason_class=("http_" + str(code)) if code else "transport_error",
+                terminal=True)
+            return {"job_id": job_id, "status": "dead", "action_id": action_id}
         return self._write(tx)
 
-    def replay(self, job_id: str) -> dict:
+    def replay(self, job_id: str, operator: str = "operator") -> dict:
         """人工重放（控制面权威，不需要 worker fence；成功态拒绝重放）。"""
         def tx(c, now):
             j = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -938,10 +1061,19 @@ class Engine:
                 (now, job_id))
             c.execute("UPDATE lanes SET not_before=0, updated_at=? WHERE lane_id=?",
                       (now, j["lane_id"]))
+            # 凭证：操作员再次执行（不含正文/密钥）。
+            self.cred.append_record(
+                c, now, self._tenant_for_job(c, job_id), RECORD_REPLAY,
+                {"delivery_id": job_id, "event_id": j["event_id"],
+                 "lane_id": j["lane_id"], "lane_seq": j["seq"],
+                 "endpoint_id": j["endpoint_id"],
+                 "prev_status": j["status"], "operator": operator,
+                 "kid": j["kid"], "sig_version": j["sig_version"]},
+                action_id=job_id + ":replay")
             return {"status": "pending", "replayed": True}
         return self._write(tx)
 
-    def skip(self, job_id: str) -> bool:
+    def skip(self, job_id: str, operator: str = "operator") -> bool:
         def tx(c, now):
             j = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if j is None:
@@ -954,6 +1086,14 @@ class Engine:
             changed = c.execute("SELECT changes() n").fetchone()["n"]
             if changed:
                 self._refresh_lane_head(c, j["lane_id"], now)
+                # 凭证：操作员跳过。
+                self.cred.append_record(
+                    c, now, self._tenant_for_job(c, job_id), RECORD_SKIP,
+                    {"delivery_id": job_id, "event_id": j["event_id"],
+                     "lane_id": j["lane_id"], "lane_seq": j["seq"],
+                     "endpoint_id": j["endpoint_id"],
+                     "prev_status": j["status"], "operator": operator},
+                    action_id=job_id + ":skip")
             return bool(changed)
         return self._write(tx)
 
@@ -1066,11 +1206,241 @@ class Engine:
                 (eid,)).fetchall()
             return {str(r["v"]): r["c"] for r in rows}
 
+    # ---- 凭证对账：悬挂意图三分类 ------------------------------------
+
+    def reconcile_intents(self, peer_probe=None) -> dict:
+        """扫描悬挂意图并归类为 safe_retry / in_doubt / converged。
+
+        ``peer_probe(job_row, action_id) -> dict|None`` 可选：对
+        recorded/sent 的意图向对方核实是否已观察到该 event_id。
+        返回 {safe_retry:[...], in_doubt:[...], converged:[...]}。
+
+        判定规则（绝不伪造成功，绝不产生双份终态凭证）：
+          * 主账 job 已 succeeded/canceled/dead 且意图未 finalize
+            => converged（补记账，不重发，不补第二张成功凭证）；
+          * job 仍 leased 且租约有效 => 跳过（动作在途，非悬挂）；
+          * recorded + job 已退回 pending，对方未见该投递 => safe_retry；
+          * 对方已见 event_id 但主账未落成功 => in_doubt（结局待查，
+            需人工/对方权威确认，禁止盲发第二条）；
+          * sent 且无法向对方核实 => in_doubt（保守）。
+        """
+        from .cred import (INTENT_CONVERGED, INTENT_IN_DOUBT,
+                           INTENT_RECORDED, INTENT_SAFE_RETRY, INTENT_SENT)
+        summary = {"safe_retry": [], "in_doubt": [], "converged": []}
+
+        dangling = self.cred.pending_intents()
+        for it in dangling:
+            j = self.job(it["job_id"])
+            if j is None:
+                continue
+            lane = self.lane(j["lane_id"])
+            now = self.now()
+            in_flight = (j["status"] == "leased" and lane is not None
+                         and lane["owner_id"] and lane["expires_at"]
+                         and lane["expires_at"] > now)
+            if in_flight:
+                continue  # 仍在有效租约内：不是悬挂意图
+
+            observed = False
+            if peer_probe is not None and it["state"] in (INTENT_RECORDED,
+                                                          INTENT_SENT):
+                try:
+                    pr = peer_probe(j, it["action_id"])
+                    observed = bool(pr and pr.get("observed"))
+                except Exception:
+                    observed = False
+
+            def classify(c, ts):
+                if j["status"] == "succeeded":
+                    self.cred.set_intent_state(
+                        c, ts, it["action_id"], INTENT_CONVERGED,
+                        finalized=True)
+                    summary["converged"].append(
+                        {"action_id": it["action_id"], "job_id": j["id"],
+                         "basis": "main_ledger_succeeded"})
+                elif j["status"] in ("dead", "canceled"):
+                    self.cred.set_intent_state(
+                        c, ts, it["action_id"], INTENT_CONVERGED,
+                        finalized=True)
+                    summary["converged"].append(
+                        {"action_id": it["action_id"], "job_id": j["id"],
+                         "basis": "main_ledger_" + j["status"]})
+                elif observed:
+                    # 对方已收到但主账未结算：结局待查，严禁再发
+                    self.cred.set_intent_state(
+                        c, ts, it["action_id"], INTENT_IN_DOUBT)
+                    summary["in_doubt"].append(
+                        {"action_id": it["action_id"], "job_id": j["id"],
+                         "basis": "peer_observed_without_local_terminal"})
+                else:
+                    # recorded/sent 但对方未见、主账已退回：安全再试
+                    # （接收方按 event_id 幂等，即使实际已达也不会二次确认）
+                    self.cred.set_intent_state(
+                        c, ts, it["action_id"], INTENT_SAFE_RETRY)
+                    summary["safe_retry"].append(
+                        {"action_id": it["action_id"], "job_id": j["id"],
+                         "basis": ("not_observed_retryable"
+                                   if it["state"] == INTENT_RECORDED
+                                   else "sent_unobserved_treat_retryable")})
+
+            self._write(classify)
+        if dangling:
+            self.cred.transact(
+                lambda c, ts: self.cred._bump(
+                    c, "intent_recoveries",
+                    len(summary["safe_retry"])
+                    + len(summary["in_doubt"])
+                    + len(summary["converged"])))
+        return summary
+
+    def intents_view(self) -> list[dict]:
+        """运维面：当前待查/悬挂意图（含 recorded/sent/in_doubt/safe_retry）。"""
+        from .cred import INTENT_CONVERGED
+        rows = self.cred.pending_intents(
+            states=("recorded", "sent", "in_doubt", "safe_retry"))
+        now = self.now()
+        out = []
+        for it in rows:
+            j = self.job(it["job_id"])
+            lane = self.lane(it["lane_id"]) if j else None
+            in_flight = bool(
+                j and j["status"] == "leased" and lane and lane["owner_id"]
+                and lane["expires_at"] and lane["expires_at"] > now)
+            out.append({**it, "job_status": j["status"] if j else None,
+                        "in_flight_lease": in_flight})
+        return out
+
+    # ---- 隐私抹除（主账正文 / 受保护附件） ----------------------------
+
+    _PAYLOAD_TOMBSTONE = json.dumps(
+        {"_redacted": True, "reason": "retention_expired"},
+        ensure_ascii=False)
+
+    def set_retention(self, tenant_id: str, *,
+                      retain_seconds: Optional[float] = None,
+                      legal_hold: Optional[bool] = None,
+                      hold_reason: Optional[str] = None) -> dict:
+        """留存策略。retain_seconds=TTL 秒数（相对事件 created_at），
+        0/None=长期留存；legal_hold=True 期间拒绝抹除。"""
+        return self.cred.transact(
+            lambda c, ts: self._set_retention_tx(
+                c, ts, tenant_id, retain_seconds, legal_hold, hold_reason))
+
+    def _set_retention_tx(self, c, now, tenant_id, ttl_seconds, legal_hold,
+                          hold_reason) -> dict:
+        self.cred.ensure_account(c, tenant_id, now)
+        if ttl_seconds is not None:
+            c.execute(
+                "UPDATE cred_retention SET retain_until=?, updated_at=? "
+                "WHERE account_id=?",
+                (float(ttl_seconds), now, tenant_id))
+        if legal_hold is not None:
+            c.execute(
+                "UPDATE cred_retention SET legal_hold=?, hold_reason=?, "
+                "updated_at=? WHERE account_id=?",
+                (1 if legal_hold else 0,
+                 hold_reason if legal_hold else None, now, tenant_id))
+        return dict(c.execute(
+            "SELECT * FROM cred_retention WHERE account_id=?",
+            (tenant_id,)).fetchone())
+
+    def retention_view(self, tenant_id: str) -> dict:
+        return self.cred.retention(tenant_id)
+
+    def scrub_privacy(self, tenant_id: str, *, batch_size: int = 100,
+                      ttl_override: Optional[float] = None) -> dict:
+        """按账户 TTL 抹除主账可识别正文（司法留置期间拒办）。
+
+        凭证链不动（链上只有哈希）；在一个事务内：选中已过 TTL 的事件 ->
+        events.payload 置墓碑 -> 追加 privacy_scrubbed 凭证（只引用
+        event_id/哈希/入账序号）-> 推进游标。
+        """
+        def tx(c, now):
+            ret = self.cred.retention(tenant_id)
+            if ret.get("legal_hold"):
+                return {"ran": False, "blocked": "legal_hold",
+                        "reason": ret.get("hold_reason"), "scrubbed": 0}
+            ttl = ttl_override if ttl_override is not None \
+                else (ret.get("retain_until") or 0)
+            rows = c.execute(
+                "SELECT ev.id AS event_id, ev.payload AS payload, ev.created_at,"
+                " r.seq AS ingest_seq FROM events ev JOIN endpoints ep "
+                "ON ep.id=ev.endpoint_id "
+                "LEFT JOIN cred_records r ON r.account_id=? "
+                "AND r.type='message_ingested' AND r.action_id=("
+                "SELECT j.id FROM jobs j WHERE j.event_id=ev.id LIMIT 1) "
+                "WHERE ep.tenant_id=? AND ev.payload NOT LIKE ? "
+                "ORDER BY ev.created_at, ev.id LIMIT ?",
+                (tenant_id, tenant_id, '{"_redacted%', batch_size)).fetchall()
+            chosen = [r for r in rows if ttl and now - r["created_at"] >= ttl]
+            refs = []
+            for r in chosen:
+                ph = hashlib.sha256(r["payload"].encode("utf-8")).hexdigest()
+                c.execute("UPDATE events SET payload=? WHERE id=?",
+                          (self._PAYLOAD_TOMBSTONE, r["event_id"]))
+                refs.append({"event_id": r["event_id"],
+                             "payload_sha256": ph,
+                             "ingest_seq": r["ingest_seq"]})
+            if chosen:
+                upto = max(r["created_at"] for r in chosen)
+                self.cred.record_scrub(
+                    c, now, account_id=tenant_id, refs=refs,
+                    ttl_seconds=float(ttl), mode="ttl_expired")
+                self.cred.mark_scrub_cursor(
+                    c, now, tenant_id, upto, len(chosen))
+            return {"ran": True, "blocked": None, "scrubbed": len(chosen),
+                    "ttl_seconds": ttl,
+                    "remaining": len(rows) - len(chosen)}
+        return self._write(tx)
+
+    def scrub_progress(self, tenant_id: str) -> dict:
+        return self.cred.scrub_progress(tenant_id)
+
+    # ---- 凭证查询（透传给 cred.Ledger）-------------------------------
+
+    def cred_head(self, account_id: str) -> dict:
+        return self.cred.head(account_id)
+
+    def cred_verify_chain(self, account_id: str, upto=None) -> dict:
+        return self.cred.verify_chain(account_id, upto=upto)
+    def cred_records(self, account_id: str, seq_from: int = 1,
+                     seq_to: Optional[int] = None) -> list[dict]:
+        return self.cred.records(account_id, seq_from, seq_to)
+
+    def cred_anchors(self, account_id: str) -> list[dict]:
+        return self.cred.anchors(account_id)
+
+    def cred_latest_anchor(self, account_id: str) -> Optional[dict]:
+        return self.cred.latest_anchor(account_id)
+
+    def cred_audit_tail(self, limit: int = 50) -> list[dict]:
+        return self.cred.audit_tail(limit)
+
+    def cred_metrics(self) -> dict:
+        return self.cred.metrics()
+
+    def cred_accounts(self) -> list[dict]:
+        return self.cred.accounts()
+
+    def cred_generations(self) -> list[dict]:
+        return self.cred.key_generations()
+
+    def cred_exports(self, account_id: Optional[str] = None) -> list[dict]:
+        return self.cred.exports(account_id)
+
+
     def reset_for_test(self) -> None:
-        """验收专用：每个场景一个全新数据库，这里仅提供热清空兜底。"""
+        """验收专用：每个场景一个全新数据库，这里仅提供热清空兜底。
+
+        封存密钥代次/换代证书（cred_key_gens/cred_rotations）刻意保留：
+        它代表跨场景的密钥沿革连续性。"""
         def tx(c, now):
             for t in ("ownership_log", "counters", "jobs", "lanes", "events",
-                      "workers", "endpoint_versions", "endpoints", "tenants"):
+                      "workers", "endpoint_versions", "endpoints", "tenants",
+                      "cred_intents", "cred_finalized", "cred_anchors",
+                      "cred_records", "cred_accounts", "cred_retention",
+                      "cred_exports", "cred_scrubs", "cred_metrics",
+                      "cred_audit"):
                 c.execute(f"DELETE FROM {t}")
                 c.execute(f"DELETE FROM sqlite_sequence WHERE name='{t}'")
         self._write(tx)

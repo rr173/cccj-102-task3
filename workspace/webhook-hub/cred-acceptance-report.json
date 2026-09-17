@@ -1,0 +1,433 @@
+{
+  "generated_at": 1789664694.7987328,
+  "suite": "whub-tamper-evident-credential-book",
+  "ttl_seconds": 4.0,
+  "summary": {
+    "total": 7,
+    "passed": 7,
+    "failed": 0
+  },
+  "scenarios": [
+    {
+      "id": "1",
+      "title": "双节点高频争用/换手：连续编号+摘要衔接+终态逐项对应",
+      "passed": true,
+      "error": null,
+      "checks_passed": 7,
+      "checks_total": 7,
+      "checks": [
+        {
+          "name": "编号连续无缺号/分叉/重复",
+          "ok": true,
+          "detail": "N=319"
+        },
+        {
+          "name": "相邻 prev_digest 完全衔接",
+          "ok": true,
+          "detail": "at None"
+        },
+        {
+          "name": "链上存在多次 ownership_handoff",
+          "ok": true,
+          "detail": "handoffs=31"
+        },
+        {
+          "name": "每个投递只有一份终态成功凭证",
+          "ok": true,
+          "detail": "{}"
+        },
+        {
+          "name": "终态凭证与接收方 receipts 逐项对应",
+          "ok": true,
+          "detail": "cred=70 recv=70"
+        },
+        {
+          "name": "离线核验无损包通过",
+          "ok": true,
+          "detail": "{'ok': True, 'first_bad_seq': None, 'last_seq': 319}"
+        },
+        {
+          "name": "凭证总数与导出一致",
+          "ok": true,
+          "detail": "319 vs 319"
+        }
+      ],
+      "detail": {
+        "record_total": 319,
+        "head_digest": "LoPKQxH7V0TsrXZ45gZ9/xNQRVQRtX6FPPgYHivMMRU=",
+        "export_cutoff": 319,
+        "elapsed": 7.72
+      }
+    },
+    {
+      "id": "2",
+      "title": "副作用前后/封存途中强杀：意图三分类、无虚假成功/双终态",
+      "passed": true,
+      "error": null,
+      "checks_passed": 10,
+      "checks_total": 10,
+      "checks": [
+        {
+          "name": "对账执行成功",
+          "ok": true,
+          "detail": "{'safe_retry': [], 'in_doubt': [], 'converged': [{'action_id': 'dlv_d0032eaededdb2d8343bd926:a1', 'job_id': 'dlv_d0032eaededdb2d8343bd926', 'basis': 'main_ledger_succeeded'}, {'action_id': 'dlv_d0032eaededdb2d8343bd926:a2', 'job_id': 'dlv_d0032eaededdb2d8343bd926', 'basis': 'main_ledger_succeeded'}]}"
+        },
+        {
+          "name": "对账后无悬挂/待查意图",
+          "ok": true,
+          "detail": "[]"
+        },
+        {
+          "name": "不存在双份终态成功凭证",
+          "ok": true,
+          "detail": "{}"
+        },
+        {
+          "name": "每条成功凭证都引用一条已存在的对方应答",
+          "ok": true,
+          "detail": "[]"
+        },
+        {
+          "name": "接收方无重复 ack（崩溃重发被幂等吸收）",
+          "ok": true,
+          "detail": "duplicates=1"
+        },
+        {
+          "name": "封存途中强杀后编号仍连续无缺号",
+          "ok": true,
+          "detail": "N=25"
+        },
+        {
+          "name": "崩溃未产生半截锚点（锚点编号不跳变）",
+          "ok": true,
+          "detail": "2->2"
+        },
+        {
+          "name": "重启后链头只增长（旧链头不被回退）",
+          "ok": true,
+          "detail": "21->25"
+        },
+        {
+          "name": "重启后补封成功且编号严格接续",
+          "ok": true,
+          "detail": "2->3"
+        },
+        {
+          "name": "崩溃恢复后整包离线可验",
+          "ok": true,
+          "detail": ""
+        }
+      ],
+      "detail": {
+        "crashes": [
+          "before_side_effect",
+          "after_side_effect"
+        ],
+        "reconcile": {
+          "safe_retry": [],
+          "in_doubt": [],
+          "converged": [
+            {
+              "action_id": "dlv_d0032eaededdb2d8343bd926:a1",
+              "job_id": "dlv_d0032eaededdb2d8343bd926",
+              "basis": "main_ledger_succeeded"
+            },
+            {
+              "action_id": "dlv_d0032eaededdb2d8343bd926:a2",
+              "job_id": "dlv_d0032eaededdb2d8343bd926",
+              "basis": "main_ledger_succeeded"
+            }
+          ]
+        },
+        "elapsed": 3.62
+      }
+    },
+    {
+      "id": "3",
+      "title": "改写/删除/调序/替换锚点：离线核验定位最早失信序号",
+      "passed": true,
+      "error": null,
+      "checks_passed": 12,
+      "checks_total": 12,
+      "checks": [
+        {
+          "name": "无损包通过",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "rewrite_middle: 离线核验器识别破坏",
+          "ok": true,
+          "detail": "ok=False"
+        },
+        {
+          "name": "rewrite_middle: 给出确定损坏位置",
+          "ok": true,
+          "detail": "first_bad=27 anchor=None tamper={'file': 'records.jsonl', 'byte_offset': 24267, 'seq': 41, 'reason': 'sha256 mismatch in records file'}"
+        },
+        {
+          "name": "rewrite_middle: 最早失信序号 <= 被改序号 27",
+          "ok": true,
+          "detail": "first_bad=27 target=27"
+        },
+        {
+          "name": "delete_row: 离线核验器识别破坏",
+          "ok": true,
+          "detail": "ok=False"
+        },
+        {
+          "name": "delete_row: 给出确定损坏位置",
+          "ok": true,
+          "detail": "first_bad=27 anchor=None tamper={'file': 'records.jsonl', 'byte_offset': 23593, 'seq': 40, 'reason': 'sha256 mismatch in records file'}"
+        },
+        {
+          "name": "delete_row: 最早失信序号 <= 被改序号 27",
+          "ok": true,
+          "detail": "first_bad=27 target=27"
+        },
+        {
+          "name": "swap_adjacent: 离线核验器识别破坏",
+          "ok": true,
+          "detail": "ok=False"
+        },
+        {
+          "name": "swap_adjacent: 给出确定损坏位置",
+          "ok": true,
+          "detail": "first_bad=27 anchor=None tamper={'file': 'records.jsonl', 'byte_offset': 24262, 'seq': 41, 'reason': 'sha256 mismatch in records file'}"
+        },
+        {
+          "name": "swap_adjacent: 最早失信序号 <= 被改序号 27",
+          "ok": true,
+          "detail": "first_bad=27 target=27"
+        },
+        {
+          "name": "replace_anchor: 离线核验器识别破坏",
+          "ok": true,
+          "detail": "ok=False"
+        },
+        {
+          "name": "replace_anchor: 给出确定损坏位置",
+          "ok": true,
+          "detail": "first_bad=42 anchor={'anchor_no': 1, 'gen': 1, 'sig_ok': False, 'chain_ok': True, 'upto_ok': True} tamper={'file': 'anchors.jsonl', 'reason': 'sha256 mismatch in anchors.jsonl'}"
+        }
+      ],
+      "detail": {
+        "earliest_bad": {
+          "rewrite_middle": 27,
+          "delete_row": 27,
+          "swap_adjacent": 27,
+          "replace_anchor": 42
+        },
+        "elapsed": 0.9
+      }
+    },
+    {
+      "id": "4",
+      "title": "压力写入并发导出：截止冻结、之后不混入、增量紧密接续",
+      "passed": true,
+      "error": null,
+      "checks_passed": 5,
+      "checks_total": 5,
+      "checks": [
+        {
+          "name": "第一批包离线可验",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "截止位置以前的内容稳定（不受后续写入影响）",
+          "ok": true,
+          "detail": "52 vs 52"
+        },
+        {
+          "name": "截止之后的条目不混入",
+          "ok": true,
+          "detail": "leaked=[]"
+        },
+        {
+          "name": "增量包起点 = 上包 cutoff+1",
+          "ok": true,
+          "detail": "53 vs 53"
+        },
+        {
+          "name": "增量包离线可验且与前包紧密接续",
+          "ok": true,
+          "detail": "{'ok': True, 'prev_head_digest': 'bEBHF9Dcbdk+9/4k0DtuS0X1xb5cCRAO4awzave9oWw=', 'expected_prev_head_digest': 'bEBHF9Dcbdk+9/4k0DtuS0X1xb5cCRAO4awzave9oWw=', 'expected_start': 53}"
+        }
+      ],
+      "detail": {
+        "cutoff1": 52,
+        "cutoff2": 208,
+        "increment_start": 53,
+        "elapsed": 2.44
+      }
+    },
+    {
+      "id": "5",
+      "title": "封存私钥换代：两包可验、旧钥伪造新锚点必败、分界可证",
+      "passed": true,
+      "error": null,
+      "checks_passed": 7,
+      "checks_total": 7,
+      "checks": [
+        {
+          "name": "换代前包可验（gen1）",
+          "ok": true,
+          "detail": "{'ok': True, 'generations': [1], 'active_gen': 1}"
+        },
+        {
+          "name": "换代成功 gen1->gen2",
+          "ok": true,
+          "detail": "{'gen_from': 1, 'gen_to': 2, 'kid_from': 'seal-1', 'kid_to': 'seal-2', 'record_seq': 1, 'pub_from': '7iG5fG7UKv8N6LlaPIURqm1djowP0P6NQ7r4b8oWs5M=', 'pub_to': 'nRzpzWT9ZMXynoRCzXwPU5Z0HACxg14BF73WteRNR"
+        },
+        {
+          "name": "换代后包可验（gen2）且沿革合法",
+          "ok": true,
+          "detail": "{'ok': True, 'generations': [1, 2], 'active_gen': 2}"
+        },
+        {
+          "name": "换代后包里两个代次锚点都验过",
+          "ok": true,
+          "detail": "2/2"
+        },
+        {
+          "name": "换代后旧包仍可验",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "泄漏的旧私钥伪造新锚点必败",
+          "ok": true,
+          "detail": "forged anchor verified with gen2 pub(!)"
+        },
+        {
+          "name": "合法换代证书证明 gen1->gen2 分界",
+          "ok": true,
+          "detail": ""
+        }
+      ],
+      "detail": {
+        "gen1_cutoff": 31,
+        "gen2_cutoff": 64,
+        "elapsed": 1.77
+      }
+    },
+    {
+      "id": "6",
+      "title": "留存抹除与司法留置：动作/次序可证、留置阻断、原值清除",
+      "passed": true,
+      "error": null,
+      "checks_passed": 10,
+      "checks_total": 10,
+      "checks": [
+        {
+          "name": "留存策略设置成功",
+          "ok": true,
+          "detail": "{'account_id': 'tnt_6713de583d91084e87cb7912', 'retain_until': 0.01, 'legal_hold': 0, 'hold_reason': None, 'updated_at':"
+        },
+        {
+          "name": "司法留置设置成功",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "司法留置期间抹除被拒",
+          "ok": true,
+          "detail": "{'ran': False, 'blocked': 'legal_hold', 'reason': 'court-order-123', 'scrubbed': 0}"
+        },
+        {
+          "name": "解除后抹除执行",
+          "ok": true,
+          "detail": "{'ran': True, 'blocked': None, 'scrubbed': 6, 'ttl_seconds': 0.01, 'remaining': 0}"
+        },
+        {
+          "name": "审计文字不含原值",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "运维接口不含原值",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "主账正文全部替换为墓碑，原值消失",
+          "ok": true,
+          "detail": "live=0 tomb=6"
+        },
+        {
+          "name": "抹除后链动作数量与次序不变",
+          "ok": true,
+          "detail": "before=33 after=34"
+        },
+        {
+          "name": "清除动作写入链且不含原值",
+          "ok": true,
+          "detail": "scrubs=1"
+        },
+        {
+          "name": "抹除后导出包离线可验",
+          "ok": true,
+          "detail": "{'ok': True, 'first_bad_seq': None, 'last_seq': 34}"
+        }
+      ],
+      "detail": {
+        "scrubbed": 6,
+        "elapsed": 1.43
+      }
+    },
+    {
+      "id": "7",
+      "title": "账库拒写：无无法记账的成功、恢复后清算、链头与终态相符",
+      "passed": true,
+      "error": null,
+      "checks_passed": 7,
+      "checks_total": 7,
+      "checks": [
+        {
+          "name": "确认阻断后拒写期间不再产生任何出站成功（receipt 不增长）",
+          "ok": true,
+          "detail": "4 vs 4"
+        },
+        {
+          "name": "worker 记录 touch/写被阻断（不靠内存 ownership 发送）",
+          "ok": true,
+          "detail": "155"
+        },
+        {
+          "name": "拒写期间无虚假成功凭证",
+          "ok": true,
+          "detail": "[]"
+        },
+        {
+          "name": "恢复后对账成功",
+          "ok": true,
+          "detail": "{'safe_retry': [], 'in_doubt': [], 'converged': []}"
+        },
+        {
+          "name": "恢复后无残留悬挂意图",
+          "ok": true,
+          "detail": "[]"
+        },
+        {
+          "name": "链头终态凭证集合 == 主账 succeeded 集合",
+          "ok": true,
+          "detail": "cred=12 db=12 only_cred=0 only_db=0"
+        },
+        {
+          "name": "恢复后整包离线可验",
+          "ok": true,
+          "detail": ""
+        }
+      ],
+      "detail": {
+        "summary": {
+          "safe_retry": [],
+          "in_doubt": [],
+          "converged": []
+        },
+        "elapsed": 11.0
+      }
+    }
+  ]
+}
